@@ -1,0 +1,58 @@
+/inst/doc/vignette.R
+/inst/doc/vignette.Rnw
+/vignettes/vignette.R
+/vignettes/patient_vignettes/*_run*.R
+/archive/
+/cfg.R
+
+# History files
+.Rhistory
+.Rapp
+*.history
+
+# Example code in package build process
+*-Ex.R
+
+# RStudio files
+*.RData
+!/data/*.RData
+.Rproj.user/
+.Rproj
+.Rproj.user
+*.Rdata
+*.Rproj
+
+# Configuration file
+cfg.R
+
+# Other file
+*.log
+*.out
+*.toc
+*.gml
+.DS_Store
+
+# C++ file
+*.o
+*.so
+*.dll
+
+# pkgdown
+docs
+doc
+Meta
+
+# image files
+*.png
+*.pdf
+*.jpeg
+
+# R objects (for fits etc.)
+*.RDS
+*.Rds
+
+# compressed and 'before' files
+*.tar.gz
+*.zip
+*.bf
+*.before

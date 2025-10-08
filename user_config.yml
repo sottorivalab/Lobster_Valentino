@@ -1,0 +1,6 @@
+# config.yml
+paths:
+  maf_dir: "/scratch/madeleine.dale/valentino_mafs"
+  ichor_seg_dir: "/scratch/madeleine.dale/valentino_segs"
+  user_dir: "/scratch/madeleine.dale/lobster_paper_fresh/lobster4publishing" 
+from_dataframe: true

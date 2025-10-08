@@ -1,0 +1,311 @@
+#' Fit a model with MOBSTER.
+#'
+#' @description This function fits the mixure of Beta distributions with a power-law Pareto
+#' Type-I tail (optional). The function performs model selection for different mixtures, which
+#' the user specify with the input parmeters. The function return a list of all fits computed
+#' (objects of class \code{dbpmm}), the best fit, a table with the results of the fits and a
+#' variable that specify which score has been used for model selection. The fitting of each model
+#' also runs the function \code{choose_clusters} which implements a simple heuristic to filter
+#' out small clusters from the fit output.
+#'
+#' Note: You can also use the "auto setup" functionality that, with one keyword, loads preset
+#' parameter values in order to implement different analysis.
+#'
+#'
+#' @param x Input tibble (or data.frame) which is required to have a VAF column which reports the
+#' frequency of the mutant allele (this should be computed adjusting the raw VAF for tumour purity
+#' and copy number status). See also package \code{mmobster} which contains functions to prepare
+#' common inputs for this computation.
+#' @param K A vector with the number of Beta components to use. All values of \code{K} must be positive
+#' and strictly greater than 0; they are combined with the value of \code{tail} to define all model
+#' configurations tested for model selection
+#' @param samples Number of fits that should be attempted for each configuration of the model tested.
+#' @param init Initial values for the paremeters of the model. With \code{"ranodm"} the mean and variance
+#' of each Beta component are randomply sampled in the interval (0,1). With \code{"peaks"} a peak detection
+#' heuristic is used to place the Beta means to match the peaks; in that case the variance is still randomised.
+#' In both cases the power-law shape is randomised.
+#' @param tail If \code{FALSE} the fit will not use a tail, if \code{TRUE} it will.
+#' @param epsilon Tolerance for convergency estimation. For MLE fit this is compared to the differential of the
+#' negative log-likelihood (NLL); for MM fit the largest differential among the mixing proportions (pi) is used.
+#' @param maxIter Maximum number of steps for a fit. If convergency is not achieved before these steps, the fit is interrupted.
+#' @param fit.type A string that determines the type of fit. \code{"MLE"} is for the Maximum Likelihood Estimate
+#' of the Beta paraneters, \code{"MM"} is for the Momemnt Matching; MLE is numerical, and thus slower. In both cases
+#' the estimator of the tail shape - if required - is its MLE and its analytical.
+#' @param seed Seed for the random numbers generator
+#' @param model.selection Score to minimize to select the best model; this has to be one of \code{'reICL'}, \code{'ICL'},
+#' \code{'BIC'}, \code{'AIC'} or \code{'NLL'}. We advise to use only reICL and ICL
+#' @param trace If \code{TRUE}, a trace of the model fit is returned that can be used to animate the model run.
+#' @param parallel Optional parameter to run the fits in parallel (default), or not.
+#' @param pi_cutoff Parameter passed to function \code{choose_clusters}, which determines the minimum mixing proportion of a
+#' cluster to be returned as output.
+#' @param N_cutoff Parameter passed to function \code{choose_clusters}, which determines the minimum number of mutations
+#' assigned to a cluster to be returned as output.
+#' @param auto_setup Overrides all the parameters with an predined set of values, in order to implement different analyses.
+#' Availables keys: `FAST`, uses 1) max 2 clones (1 subclone), 2) random initial conditions 3) 2 samples per parameter set
+#' 4) mild `epsilon` and `maxIter`, sequential run. For reference, the default set of parameters represent a more exhaustive
+#' analysis.
+#' @param description A textual description of this dataset.
+#'
+#' @return A list of all fits computed (objects of class \code{dbpmm}), the best fit, a table with the results of the fits and a
+#' variable that specify which score has been used for model selection.
+#'
+#' @importFrom dplyr filter mutate select arrange desc pull row_number group_by
+#' @importFrom dplyr summarise bind_cols rename bind_rows left_join distinct
+#' @importFrom dplyr ungroup full_join
+#' @importFrom tidyr spread gather tibble tribble as_tibble
+#' @importFrom magrittr %>%
+#' @export
+#
+#' @examples
+#' # Generate a random dataset
+#' x = random_dataset(seed = 123, Beta_variance_scaling = 100, N = 200)
+#' print(x) # Contains a ggplot object
+#'
+#' # Fit, default models, changed epsilon for convergence
+#' x = mobster_fit(x$data, epsilon = 1e-5)
+#'
+#' plot(x$best)
+#' print(x$best)
+#'
+#' lapply(x$runs[1:3], plot)
+mobster_fit = function(x,
+                       K = 1:3,
+                       samples = 5,
+                       init = 'peaks',
+                       tail = c(TRUE, FALSE),
+                       epsilon = 1e-10,
+                       maxIter = 250,
+                       fit.type = 'MLE',
+                       seed = 12345,
+                       model.selection = 'BIC',
+                       trace = FALSE,
+                       parallel = TRUE,
+                       pi_cutoff = 0.02,
+                       N_cutoff = 10,
+                       auto_setup = NULL,
+                       silent = FALSE,
+                       log_MMscaled = FALSE,
+                       xstar = NULL,
+                       genSA_steps = 2,
+                       description = "My MOBSTER model",
+                       Gopt = "SA",
+                       quantile = TRUE,
+                       untf_convolved = FALSE,
+                       no_filtering = FALSE)
+{
+  pio::pioHdr(paste0("MOBSTER fit"))
+  cat('\n')
+  
+  if(log_MMscaled==TRUE){
+    warning('logMM_scaled==TRUE deprecated; switching to log_MMscaled=FALSE (computation is mathematically equivalent) \n')
+    log_MMscaled= FALSE
+  }
+  
+  if (no_filtering==FALSE){
+    # select for only SNPs
+    x = x[x$VariantType=='SNP',]
+    
+    # filter for coverage
+    coverage_limit = 10
+    x = x[!apply(x$DP, 1, function(row) any(row < coverage_limit)),]
+    
+    ## remove some upper quantile of VAF  
+    if (quantile){
+      max_vaf = x$VAF %>% lapply(function(x) {quantile(x, probs = c(0.97),na.rm=TRUE)})
+      for (t in as.character(1:get_no_timepoints(x))){
+        x$VAF[[t]][(x$VAF[[t]] >= max_vaf[[t]])] =  NA
+      }
+    }
+  
+    x$VAF_orig = x$VAF
+  }
+  
+  X = tibble::as_tibble(x)
+  
+  # relics from logMM_scaled - set to NULL
+  MM_scale_a = NULL 
+  MM_scale_b = NULL 
+  
+  # Check for basic input requirements
+  mobster:::check_input(x,
+              K,
+              samples,
+              init,
+              tail,
+              epsilon,
+              maxIter,
+              fit.type,
+              seed,
+              model.selection,
+              trace,
+              xstar,
+              Gopt,
+              log_MMscaled,
+              untf_convolved)
+  
+  mobster:::m_ok("Loaded input data, n = {.value {nrow(x)}}.") %>% cli::cli_text()
+  
+  if(fit.type=='MM'){
+    warning('MM not available - switching to numerical MLE\n')
+    fit.type = 'MLE'
+  }
+  
+  if(init == 'peaks'){
+    warning('Peaks initialisation not available - switching to initialisation of alpha, beta params of ExpMMbeta through uniform random assignment between 2 and 10\n')
+    init = 'random'
+  }
+  
+  ###################### Auto setup of parameters
+  if (!is.null(auto_setup))
+  {
+    # Get the parameters, checks they are known, throws errors.
+    template = mobster:::auto_setup(auto_setup)
+    
+    K = template$K
+    samples = template$samples
+    init = template$init
+    tail = template$tail
+    epsilon = template$epsilon
+    maxIter = template$maxIter
+    fit.type = template$fit.type
+    seed = template$seed
+    model.selection = template$model.selection
+    trace = template$trace
+    parallel = template$parallel
+    pi_cutoff = template$pi_cutoff
+    N_cutoff = template$N_cutoff
+  }
+  
+  ###################### Initializations
+  TIME = as.POSIXct(Sys.time(), format = "%H:%M:%S")
+  
+  # Storage variables
+  best = obj = runs = NULL
+  
+  # Configurations that will be used for model selection
+  tests = expand.grid(
+    K = K,
+    tail = tail,
+    Run = 1:samples,
+    stringsAsFactors = FALSE
+  )
+  ntests = nrow(tests)
+  
+  ###################### Print message
+  if (!log_MMscaled){ # normal Pareto tail 
+    mobster:::m_txt(
+      "n = {.value {nrow(x)}}. Mixture with k = {.field {paste(K, collapse = ',')}} Beta(s). Pareto tail: {.field {tail}}. Output clusters with \u03c0 > {.value {pi_cutoff}} and n > {.value {N_cutoff}}."
+    ) %>% cli::cli_text()
+  } else if (!is.null(MM_scale_b)){ # exponential (min-max scaled) tail and exponentialised (min-max scaled) beta 
+    mobster:::m_txt(
+      "n = {.value {nrow(x)}}. Mixture with k = {.field {paste(K, collapse = ',')}} Exponentiated MM-scaled Beta(s). Exponential (scaled) tail: {.field {tail}}. Output clusters with \u03c0 > {.value {pi_cutoff}} and n > {.value {N_cutoff}}."
+    ) %>% cli::cli_text()
+  }
+  else { # exponential (min-max scaled) tail and regular beta 
+    mobster:::m_txt(
+      "n = {.value {nrow(x)}}. Mixture with k = {.field {paste(K, collapse = ',')}} Beta(s). Exponential (scaled) tail: {.field {tail}}. Output clusters with \u03c0 > {.value {pi_cutoff}} and n > {.value {N_cutoff}}."
+    ) %>% cli::cli_text()
+  }
+  
+  if (!is.null(auto_setup))
+    mobster:::m_wrn("mobster automatic setup {.field {auto_setup}} for the analysis.") %>% cli::cli_text()
+  else
+    mobster:::m_txt(
+      'Custom fit by {.field {ifelse(fit.type == \'MM\', "Moments-matching", "Maximum-Likelihood")}} in up to {.value {maxIter}} steps, with \u03B5 = {.value {epsilon}} and {.field {init}} initialisation.'
+    ) %>% cli::cli_text()
+  
+  mobster:::m_txt(
+    'Scoring ({.value {ifelse(parallel, green("with parallel"), red("without parallel"))}}) {.value {samples}} x {.value {length(K)}} x {.value {length(tail)}} = {.field {ntests}} models by {.field {model.selection}}.'
+  ) %>% cli::cli_text()
+  cat('\n')
+  
+  
+  # =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+  # Fits are obtained using the easypar package
+  # which allows easy parallelization of R functions
+  #
+  # https://github.com/caravagn/easypar
+  #
+  # Inputs in the easypar format - list of lists
+  # =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+  inputs = lapply(1:nrow(tests),
+                  function(r)
+                    list(
+                      X = x,
+                      K = tests[r, 'K'],
+                      init = init,
+                      tail = tests[r, 'tail'],
+                      epsilon = epsilon,
+                      maxIter = maxIter,
+                      fit.type = fit.type,
+                      trace = trace,
+                      pi_cutoff = pi_cutoff,
+                      N_cutoff = N_cutoff, 
+                      description = description,
+                      log_MMscaled = log_MMscaled,
+                      MM_scale_a = MM_scale_a, 
+                      MM_scale_b = MM_scale_b, 
+                      #is_verbose=TRUE,
+                      genSA_steps = genSA_steps,
+                      xstar = xstar, 
+                      seed = seed,
+                      Gopt = Gopt,
+                      untf_convolved = untf_convolved
+                    ))
+  
+  runs = easypar::run(
+    FUN = mobster:::.dbpmm.EM,
+    PARAMS = inputs,
+    packages = c("dplyr", 'tidyr', "mobster", "DEoptim", "abind", "combinat"), # Required for pipes and other functions
+    export = ls(globalenv(), all.names = TRUE),
+    cores.ratio = .8,
+    #cache = "./my_cache.Rds",
+    parallel = parallel,
+    filter_errors = FALSE # Error management is inside easypar
+    #silent=FALSE
+  )
+  
+  # Should not happen
+  #if (length(runs) == 0)
+  #  stop("All task returned errors, no fit available, raising this error to interrupt the computation....")
+  if (length(runs) != ntests)
+    stop("At least one task returned an error, raising this error to interrupt the computation....")
+  
+  # What is successfull (id of the task)
+  mkey <- names(which(sapply(runs, function(x) {"message" %in% names(x)})))
+  runs[mkey] <- NULL
+  succesfull_tasks = names(runs) %>% as.numeric()
+  tests = tests[succesfull_tasks, , drop = FALSE]
+  
+  # Report timing to screen
+  TIME = difftime(as.POSIXct(Sys.time(), format = "%H:%M:%S"), TIME, units = "mins")
+  
+  cat('\n\n')
+  mobster:::m_inf("{crayon::bold('MOBSTER fits')} completed in {.value {prettyunits::pretty_dt(TIME)}}.") %>% cli::cli_text()
+  cat('\n')
+  
+  # Get all scores
+  scores_succesfull_tasks = lapply(runs, function(w)
+    w$scores)
+  tests = bind_cols(tests, Reduce(bind_rows, scores_succesfull_tasks))
+  
+  # clean up some repeated results -- show unique fits
+  tests$Run = NULL
+  scores.columns = colnames(runs[[1]]$scores)
+  tests[, scores.columns] = apply(tests[, scores.columns], 2, round, digits = 2)
+  
+  runs = runs[!duplicated(tests)] # remove duplicated entries..
+  tests = tests[!duplicated(tests),] # remove duplicated entries..
+  rownames(tests) = NULL
+  
+  # Model selection -- this will be returned later ..
+  model = model_selection(runs, scores.suitable = model.selection)
+  model = model$model.selection[[model.selection]]
+  model$model.selection = model.selection
+  
+  ###### SHOW BEST FIT
+  # cli::cli_alert_info(paste(bold("BEST:"), model.selection))
+  #print.dbpmm(model$best)
+  
+  return(model)
+}

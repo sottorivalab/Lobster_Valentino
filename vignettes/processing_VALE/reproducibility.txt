@@ -1,0 +1,23 @@
+Note on Reproducibility
+-----------------------
+The original analysis involved random sampling of mutations without a fixed seed in the preprocessing script. A seed has now been added (R/processing.R, line 276) to make the code fully deterministic.
+
+This change means that running the current workflow from start to finish will produce fits that differ slightly from those in the paper. Below are instructions for both the current deterministic workflow and for reproducing the original fits used in the paper.
+
+Current deterministic workflow
+------------------------------
+The run_lobster_i_VALE.sh script provides a fully deterministic output and includes the original preprocessing method, however with the added seed. 
+To run in this mode, set from_dataframe to false in the config.yaml file.
+
+Reproducing precisely the original fits
+----------------------------------------
+To precisely reproduce the fits and figures from the paper, you must use the dataframe generated during the original preprocessing.
+To do this, edit sbatch_script_vale.sh and replace run_lobster_i_VALE.R with run_lobster_i_dataframe.R. 
+This script bypasses preprocessing and runs the analysis on the original sampled input dataframe.
+
+In order to carry out postprocessing from these fits, set from_dataframe to true in the config.yaml file and run the post-processing script as normal.
+
+Computational Environment
+-------------------------
+Details on the package versions, C compiler, R version, and architecture are listed in installed_packages.txt. 
+Please note that using a different CPU architecture may produce slightly different results due to floating-point variations.

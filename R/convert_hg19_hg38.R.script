@@ -1,0 +1,28 @@
+library(rtracklayer)
+library(tidyverse)
+chainFile <- "hg19ToHg38.over.chain"
+chain <- import.chain(chainFile)
+load('PCAWG_TabS3_drivers.rda')
+
+# get rid of non numeric position
+my_df <- PCAWG_TabS3_drivers %>%
+  select(chr, pos, ref, alt, gene) %>%
+  filter(!str_detect(pos, "x"))
+
+# make a granges object for liftOver function from rtracklayer
+gr <- GRanges(
+  seqnames = Rle(my_df$chr),
+  ranges = IRanges(start = as.numeric(my_df$pos), end = as.numeric(my_df$pos)),
+  ref = my_df$ref,
+  alt = my_df$alt,
+  gene = my_df$gene
+)
+
+# run liftOver
+my_gr <- liftOver(gr, chain = chain)
+# return to dataframe
+my_gr_df <- as.data.frame(my_gr) %>%
+  select(seqnames,start,ref,alt,gene) %>%
+  rename(chr = seqnames, pos = start)
+
+saveRDS(my_gr_df,"PCAWG_hg38_liftover.rds")
